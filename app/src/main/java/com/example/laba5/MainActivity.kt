@@ -2,10 +2,13 @@ package com.example.laba5
 
 import android.os.Bundle
 import android.widget.Toast
+import android.graphics.Color as AndroidColor
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.darkColorScheme
@@ -14,28 +17,41 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import com.example.laba5.data.User
 import com.example.laba5.data.UserRepository
 import com.example.laba5.screens.*
 import com.example.laba5.examples.*
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import java.time.LocalDateTime
-import java.time.format.DateTimeFormatter
 
 class MainActivity : ComponentActivity() {
+    @Suppress("DEPRECATION")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        window.statusBarColor = AndroidColor.TRANSPARENT
+        window.navigationBarColor = AndroidColor.TRANSPARENT
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+            window.isNavigationBarContrastEnforced = false
+        }
         val preferences = getSharedPreferences("lab5_settings", MODE_PRIVATE)
         setContent {
             var darkTheme by remember { mutableStateOf(preferences.getBoolean("dark_theme", false)) }
             MaterialTheme(colorScheme = if (darkTheme) darkColorScheme() else lightColorScheme()) {
+                SideEffect {
+                    WindowInsetsControllerCompat(window, window.decorView).apply {
+                        isAppearanceLightStatusBars = !darkTheme
+                        isAppearanceLightNavigationBars = !darkTheme
+                    }
+                }
                 Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-                    AppNavigation(darkTheme, { enabled ->
-                        darkTheme = enabled
-                        preferences.edit().putBoolean("dark_theme", enabled).apply()
-                    }, { finish() })
+                    Box(Modifier.fillMaxSize().safeDrawingPadding()) {
+                        AppNavigation(darkTheme, { enabled ->
+                            darkTheme = enabled
+                            preferences.edit().putBoolean("dark_theme", enabled).apply()
+                        }, { finish() })
+                    }
                 }
             }
         }
@@ -46,6 +62,7 @@ class MainActivity : ComponentActivity() {
 fun AppNavigation(darkTheme: Boolean, onThemeChange: (Boolean) -> Unit, onExit: () -> Unit) {
     val context = LocalContext.current
     val repository = remember { UserRepository(context.applicationContext) }
+    LaunchedEffect(repository) { repository.importLegacyAuthLog(context.applicationContext) }
     val scope = rememberCoroutineScope()
     var currentScreen by rememberSaveable { mutableStateOf("login") }
     var user by remember { mutableStateOf<User?>(null) }
@@ -69,12 +86,6 @@ fun AppNavigation(darkTheme: Boolean, onThemeChange: (Boolean) -> Unit, onExit: 
                 val found = repository.authenticate(login, password)
                 if (found == null) error = "Неверный логин или пароль" else {
                     user = found
-                    withContext(Dispatchers.IO) {
-                        context.openFileOutput("auth.log", android.content.Context.MODE_APPEND).bufferedWriter().use {
-                            val time = LocalDateTime.now().format(DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm:ss"))
-                            it.appendLine("$time — ${found.login}")
-                        }
-                    }
                     notice = "Вход выполнен"; currentScreen = "menu"
                 }
             }
@@ -94,14 +105,14 @@ fun AppNavigation(darkTheme: Boolean, onThemeChange: (Boolean) -> Unit, onExit: 
             if (activeUser == null) currentScreen = "login" else {
                 if (notice != null) { Toast.makeText(context, notice, Toast.LENGTH_SHORT).show(); notice = null }
                 MenuScreen(activeUser, { destination ->
-                    if (destination in listOf("users", "auth_log") && !activeUser.isAdmin) currentScreen = "menu" else currentScreen = destination
+                    if (destination in listOf("users", "auth_log") && !canAccessAdminScreens(activeUser)) currentScreen = "menu" else currentScreen = destination
                 }, {
                     user = null; currentScreen = "login"
                 })
             }
         }
         "users" -> {
-            if (user?.isAdmin != true) currentScreen = "menu" else UsersScreen(repository, { chosen -> selectedUser = chosen; currentScreen = "profile" }, { currentScreen = "menu" })
+            if (!canAccessAdminScreens(user)) currentScreen = "menu" else UsersScreen(repository, { chosen -> selectedUser = chosen; currentScreen = "profile" }, { currentScreen = "menu" })
         }
         "profile" -> {
             val profile = if (selectedUser == null) user else selectedUser
@@ -117,7 +128,7 @@ fun AppNavigation(darkTheme: Boolean, onThemeChange: (Boolean) -> Unit, onExit: 
             }, { selectedUser = null; currentScreen = if (user?.isAdmin == true) "users" else "menu" })
         }
         "settings" -> SettingsScreen(darkTheme, onThemeChange, { currentScreen = "menu" })
-        "auth_log" -> if (user?.isAdmin == true) AuthLogScreen(onBack = { currentScreen = "menu" }) else currentScreen = "menu"
+        "auth_log" -> if (canAccessAdminScreens(user)) AuthLogScreen(repository, onBack = { currentScreen = "menu" }) else currentScreen = "menu"
         "examples" -> ExamplesMenu({ currentScreen = it }, { currentScreen = "menu" })
         "text_example" -> TextExample { currentScreen = "examples" }
         "layout_example" -> LayoutExample { currentScreen = "examples" }
@@ -125,3 +136,5 @@ fun AppNavigation(darkTheme: Boolean, onThemeChange: (Boolean) -> Unit, onExit: 
         "list_example" -> ListExample { currentScreen = "examples" }
     }
 }
+
+fun canAccessAdminScreens(user: User?): Boolean = user?.isAdmin == true

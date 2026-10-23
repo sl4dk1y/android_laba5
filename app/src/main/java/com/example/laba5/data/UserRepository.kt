@@ -2,17 +2,25 @@ package com.example.laba5.data
 
 import android.content.Context
 import android.util.Base64
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.security.MessageDigest
 import java.security.SecureRandom
 import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.PBEKeySpec
+import java.text.ParsePosition
+import java.text.SimpleDateFormat
+import java.util.Locale
 
-class UserRepository(context: Context) {
-    private val dao = AppDatabase.get(context).userDao()
+class UserRepository constructor(
+    private val dao: UserDao,
+    private val authLogDao: AuthLogDao
+) {
+    constructor(context: Context) : this(AppDatabase.get(context).userDao(), AppDatabase.get(context).authLogDao())
+
     val users: Flow<List<User>> = dao.observeAll()
+    val authLogs: Flow<List<AuthLog>> = authLogDao.observeAllNewestFirst()
 
     suspend fun register(login: String, password: String, fullName: String, birthDate: String,
                         gender: String, avatarUri: String?): Result<User> = withContext(Dispatchers.IO) {
@@ -36,7 +44,35 @@ class UserRepository(context: Context) {
 
     suspend fun authenticate(login: String, password: String): User? = withContext(Dispatchers.IO) {
         val user = dao.findByLogin(login.trim().lowercase()) ?: return@withContext null
-        if (verify(password, user.passwordHash)) user else null
+        if (!verify(password, user.passwordHash)) return@withContext null
+        authLogDao.insert(AuthLog(userId = user.id, login = user.login, timestamp = System.currentTimeMillis()))
+        user
+    }
+
+    /** Imports only lines matching the exact legacy `dd.MM.yyyy HH:mm:ss — login` format. */
+    suspend fun importLegacyAuthLog(context: Context): Int = withContext(Dispatchers.IO) {
+        val lines = try {
+            context.openFileInput("auth.log").bufferedReader().useLines { it.toList() }
+        } catch (_: java.io.FileNotFoundException) {
+            return@withContext 0
+        } catch (_: Exception) {
+            return@withContext 0
+        }
+        val formatter = SimpleDateFormat("dd.MM.yyyy HH:mm:ss", Locale.ROOT).apply { isLenient = false }
+        var imported = 0
+        lines.forEach { line ->
+            val delimiter = " — "
+            val split = line.indexOf(delimiter)
+            if (split <= 0 || split + delimiter.length >= line.length) return@forEach
+            val position = ParsePosition(0)
+            val date = formatter.parse(line.substring(0, split), position)
+            val login = line.substring(split + delimiter.length).trim()
+            if (date == null || position.index != split || login.isBlank() || login.any { it.isWhitespace() }) return@forEach
+            val userId = dao.findByLogin(login)?.id
+            val result = authLogDao.insert(AuthLog(userId = userId, login = login, timestamp = date.time))
+            if (result != -1L) imported++
+        }
+        imported
     }
 
     suspend fun promote(actorId: Long, targetId: Long): Boolean = withContext(Dispatchers.IO) {
